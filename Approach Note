@@ -1,0 +1,158 @@
+# Approach Note
+## Merch WBR Automation — Lenskart
+**Prepared by:** Claude AI (Anthropic Sonnet)  
+**Date:** 24 April 2026  
+**Project Type:** AI-Native Business Intelligence Automation
+
+---
+
+## 1. Problem Statement
+
+The Lenskart Merchandising team produces a Weekly Business Review (WBR) covering revenue performance, brand-level sales, inventory positions, and store availability metrics across India. Before this project, the WBR required:
+
+- Manual data extraction from multiple Power BI dashboards
+- Copy-paste into Excel with manual formatting
+- Separate inventory pulls from warehouse and store-level models
+- Ad-hoc availability analysis from two separate Merch dashboards
+- Several hours of analyst time every week, with high risk of human error
+
+The core challenge was not a lack of data — Lenskart's Power BI environment is rich with semantic models — but the absence of an automated layer that could query, process, and present that data reliably and repeatedly.
+
+---
+
+## 2. Objective
+
+Design and build a fully automated WBR pipeline that:
+
+1. Connects live to Power BI semantic models without any manual exports
+2. Pulls all required metrics (revenue, inventory, availability) via DAX queries
+3. Produces two publication-ready outputs: an Excel report and an interactive HTML dashboard
+4. Can be refreshed by any team member by simply asking Claude to "update the WBR"
+5. Is self-documenting — all rules, patterns, and gotchas captured in persistent knowledge files
+
+---
+
+## 3. Technical Approach
+
+### 3.1 Core Architecture
+
+The solution uses **Claude AI (Anthropic Sonnet)** as the orchestration layer, connected to Power BI semantic models via the **Power BI MCP (Model Context Protocol) Server**. MCP provides an XMLA-compatible interface that allows Claude to execute DAX queries directly against live Fabric semantic models.
+
+This eliminates the traditional ETL layer entirely. There is no pipeline, no scheduled refresh, no data warehouse copy — Claude queries the same models that Power BI dashboards use, ensuring complete consistency.
+
+### 3.2 Models Connected
+
+Four semantic models are used, each serving a distinct purpose:
+
+**`Lenskart_DSR` (LK Business workspace)**  
+The primary revenue model. Contains order-level transaction data with dimensions for channel (lead_team), store (Dim_Store_Master), product (Dim_Product_Master, Dim_Brand_Category), date (Dim_Date_TimeLine), customer type (customer_tag_product), and NPS (Dim_NPS_Master). Used for all revenue, order, ATV, return, and NPS metrics.
+
+**`Cluade Sematic for Inventory` (Digital Analytics workspace)**  
+The primary inventory model. Contains daily point-in-time snapshots of warehouse inventory (`WH Inventory` table, `warehouse_quantity` column) and store inventory (`Store inventory` table, `total_inv` column) from April 2025 onwards. This is the only model used for stock figures — a key architectural decision made to avoid data inconsistencies between models.
+
+**`Core Performance & Inventory Dashboard - Updated` (Merch Reports workspace)**  
+Used exclusively for Core PID availability and spread metrics. Contains the `StoreDate_BrandCat_Availability` table which stores daily per-store, per-brand-category availability. The measure `% Stores have more than X% PID availability (Daily Avg) FAST - Test` computes a daily average of stores meeting the spread threshold. Default spread: 85%.
+
+**`Continuity A Performance & Inventory Dashboard - Updated` (Merch Reports workspace)**  
+Same structure as Core but for Continuity A PIDs. The availability measure is named `FAST - Test _new` (different from Core). Default spread: 50%. Data available from February 2026.
+
+### 3.3 DAX Query Strategy
+
+Claude generates and executes DAX queries using `SUMMARIZECOLUMNS` with explicit date filters, dimension groupings, and measure references. Key patterns developed during the project:
+
+- **Monthly revenue:** `SUMMARIZECOLUMNS` over `Dim_Date_TimeLine[Year-Month]` with `FILTER(ALL(...))` date range
+- **Channel grouping:** Assisted = `lead_team IN ("Chat", "Pre_Sales")` — must be summed, not filtered separately
+- **Inventory snapshots:** `FILTER` on `snapshot_date_ = EOMONTH(...)` for monthly, `snapshot_date_ = <sunday_date>` for weekly — never summed across days
+- **Availability:** `SUMMARIZECOLUMNS` over `StoreDate_BrandCat_Availability[Brand - Cat]` × `Dim_Date_TimeLine[Year-Month]` with `Spread_Selector` override
+
+### 3.4 Critical Data Rules Discovered
+
+Several non-obvious rules were identified during development that are critical to data accuracy:
+
+- `website_quantity` in the WH Inventory table is **offline reserved stock**, not online stock — a counter-intuitive naming convention that would cause incorrect reporting if not handled
+- `customer_tag_product` is a **numeric** field (1 = New, 2 = Repeat) — using string comparisons causes silent type errors
+- `merch_brand_cat` lives in `Dim_Product_Master`, not `Dim_Brand_Category` despite the more intuitive location
+- Applying `country = "IN"` at the overall level **understates online revenue** because international online orders are material
+- NPS date is **not auto-linked** to the date table — `USERELATIONSHIP` must be explicitly added to every NPS query
+- Workspace names are **case-sensitive** in Fabric XMLA connections ("Merch Reports" not "merch reports")
+
+### 3.5 Output Generation
+
+**Excel Report** is generated using Python's `openpyxl` library. The report follows a fixed 2-tab structure (Monthly × Weekly) with three sections per tab (Channel, Brand, Inventory). MoM%/WoW% cells are conditionally formatted in Python before saving. File is named `WBR_DD-Mon-YYYY.xlsx`.
+
+**HTML Dashboard** is a single self-contained HTML file with inline CSS and JavaScript. It requires no server, no framework, and no dependencies — it opens directly in any browser. The dashboard was designed with three tabs:
+
+1. **Monthly View** — 13-month trend with channel and brand tables, inventory section, line chart and bar chart
+2. **Weekly View** — 6-week view with same structure, Sunday-snapshot inventory
+3. **Store Availability** — Separate tables for Cont A (50%) and Core (85%), monthly and weekly, with colour-coded availability %
+
+The HTML file is always updated in-place at the same path (`WBR_Dashboard.html`) — never renamed or duplicated — to maintain a stable reference point.
+
+### 3.6 Knowledge Persistence
+
+Two knowledge files are maintained and updated after every session:
+
+**`wbr_memory_dsr.md`** (21 sections) — The complete technical reference. Covers all field mappings, measure names, DAX patterns, channel groupings, inventory rules, availability measure schemas, known bugs, and edge cases. It serves as Claude's persistent memory about the data models and business logic.
+
+**`wbr_prompt_dsr.md`** (Steps 0–8) — The operational guide. Each step covers one phase of the WBR generation process: connecting to models, checking data freshness, pulling weekly DSR sections, pulling monthly sections, generating availability data, creating outputs, and running the pre-share checklist. Pasting this file at the start of any new conversation fully bootstraps the session context.
+
+---
+
+## 4. Challenges and Solutions
+
+| Challenge | Solution |
+|---|---|
+| XMLA sessions expire between conversations | Reconnect all 4 models at the start of every session — handled automatically when prompt file is pasted |
+| Inventory numbers repeating across months | Root cause: HTML file corruption from a mid-script injection that split `<html lang="en">` into the JS. Fixed by reconstructing the file cleanly from the intact `<head>` section onwards |
+| Weekly inventory section missing | Same corruption issue — the `buildInvTable('w-inv')` call was appended after `</html>` due to a broken string replacement. Fixed by always injecting INV data before the closing `</script>` tag |
+| `website_quantity` misinterpretation | Documented as OFFLINE reserved stock in both knowledge files with explicit warning — never show by default |
+| NPS queries returning wrong dates | Explicit `USERELATIONSHIP` added to every NPS query — no auto-link between NPS and the main date table |
+| Availability measure names differ between models | `FAST - Test _new` (Cont A) vs `FAST - Test` (Core) — both documented in memory file with a do-not-swap warning |
+| Country filter understating online revenue | `country = "IN"` filter removed from all-India queries — documented with explanation |
+
+---
+
+## 5. Project Outcomes
+
+- **Time saved:** WBR generation reduced from ~3-4 hours of manual work to a single conversation (~15 minutes including model reconnection and file generation)
+- **Consistency:** All outputs derived from the same live Power BI models used by the business — no divergence from source
+- **Repeatability:** Any team member can regenerate the WBR by pasting `wbr_prompt_dsr.md` and asking Claude to update — no technical knowledge required
+- **Auditability:** Every query, filter, and business rule is documented in `wbr_memory_dsr.md` — complete traceability of what the numbers mean and where they come from
+- **Extensibility:** The knowledge file structure and query patterns can be extended to cover additional metrics, brands, or geographies with minimal incremental effort
+
+---
+
+## 6. Deliverables
+
+| Deliverable | Description |
+|---|---|
+| `WBR_Dashboard.html` | Interactive 3-tab HTML dashboard (Monthly · Weekly · Store Availability) |
+| `WBR_DD-Mon-YYYY.xlsx` | 2-tab Excel report with Channel, Brand, Inventory sections |
+| `wbr_memory_dsr.md` | 21-section technical reference document |
+| `wbr_prompt_dsr.md` | Step-by-step operational guide (Steps 0–8) |
+| `README.md` | GitHub project documentation |
+| `Merch_WBR_README.docx` | One-page project overview (Word format, A4) |
+
+---
+
+## 7. How to Maintain
+
+**Every week (WBR update):**
+1. Open Claude.ai, paste `wbr_prompt_dsr.md`
+2. Say "Update the Merch WBR"
+3. Claude reconnects, pulls fresh data, updates `WBR_Dashboard.html` in-place, and generates a new Excel file
+4. Both files are presented for download
+
+**After any model schema change:**
+1. Re-run relevant DAX queries to verify field names and measure names
+2. Update `wbr_memory_dsr.md` with any changes
+3. Note the change date and what changed
+
+**After adding new brands or metrics:**
+1. Update the brand list / metric mapping in `wbr_memory_dsr.md`
+2. Update the relevant sections in `wbr_prompt_dsr.md`
+3. Regenerate the WBR to verify
+
+---
+
+*End of Approach Note*
